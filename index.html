@@ -318,6 +318,9 @@
   const progBar = document.getElementById('prog');
   const levelLabel = document.getElementById('levelLabel');
   function showStart(){ setLevelLabel(); overlay.style.display='grid'; }
+  // Start button handler (was missing)
+  const startBtn = document.getElementById('startBtn');
+  if (startBtn) startBtn.addEventListener('click', (e)=>{ e.preventDefault(); startGame(); });
   showStart();
 
 })();

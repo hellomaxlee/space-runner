@@ -6,9 +6,9 @@
   <title>Space Runner — 3D (First Person)</title>
   <style>
     :root{ --bg:#050914; --fg:#e6f1ff; --accent:#66e6ff; --accent2:#9b66ff; }
-    html,body{height:100%;margin:0;background:radial-gradient(1200px 600px at 70% -10%,#0f1630 0%,#070b18 40%,#05080f 70%, #03050b 100%);color:var(--fg);font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;}
+    html,body{height:100%;margin:0;background:#0c111b;color:var(--fg);font-family:Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;}
     #hud{position:fixed;inset:0;pointer-events:none}
-    .panel{position:absolute;left:16px;top:16px;background:#0b1225cc;border:1px solid #1f2b4d;border-radius:12px;padding:10px 12px;backdrop-filter: blur(4px);} 
+    .panel{position:absolute;left:16px;top:16px;background:#0e1422cc;border:1px solid #19223a;border-radius:10px;padding:8px 10px;backdrop-filter: blur(3px);} 
     .panel h1{font-size:16px;margin:0 0 4px 0;letter-spacing:.05em;color:var(--accent)}
     .panel p{margin:2px 0;font-size:13px;opacity:.9}
     .progress{position:absolute;right:16px;top:16px;width:min(38vw,420px);height:14px;background:#101835;border-radius:999px;border:1px solid #1f2b4d;overflow:hidden}
@@ -314,13 +314,12 @@
     draw(); requestAnimationFrame(loop); }
 
   // ---------- Init ----------
-  const overlay = document.getElementById('overlay');
-  const progBar = document.getElementById('prog');
-  const levelLabel = document.getElementById('levelLabel');
   function showStart(){ setLevelLabel(); overlay.style.display='grid'; }
-  // Start button handler (was missing)
+  // Start button + keyboard start
   const startBtn = document.getElementById('startBtn');
-  if (startBtn) startBtn.addEventListener('click', (e)=>{ e.preventDefault(); startGame(); });
+  if (startBtn) startBtn.addEventListener('click', (e)=>{ e.preventDefault(); if(!running) startGame(); });
+  // also allow Space to start from overlay
+  addEventListener('keydown', (e)=>{ if (e.key===' ' && !running){ e.preventDefault(); startGame(); }});
   showStart();
 
 })();

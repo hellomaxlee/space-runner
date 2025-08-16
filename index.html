@@ -3,19 +3,13 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Space Runner</title>
+  <title>Space Runner — 3D (First Person)</title>
   <style>
     :root{
-      --bg:#050914;
-      --fg:#e6f1ff;
-      --accent:#66e6ff;
-      --accent2:#9b66ff;
-      --danger:#ff5d7a;
-      --success:#6fffb7;
+      --bg:#050914; --fg:#e6f1ff; --accent:#66e6ff; --accent2:#9b66ff; --ok:#6fffb7; --warn:#ffd166;
     }
     html,body{height:100%;margin:0;background:radial-gradient(1200px 600px at 70% -10%,#0f1630 0%,#070b18 40%,#05080f 70%, #03050b 100%);color:var(--fg);font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;}
-    canvas{display:block;width:100vw;height:100vh;}
-    .hud{position:fixed;inset:0;pointer-events:none}
+    #hud{position:fixed;inset:0;pointer-events:none}
     .panel{position:absolute;left:16px;top:16px;background:#0b1225cc;border:1px solid #1f2b4d;border-radius:12px;padding:10px 12px;backdrop-filter: blur(4px);}
     .panel h1{font-size:16px;margin:0 0 4px 0;letter-spacing:.05em;color:var(--accent)}
     .panel p{margin:2px 0;font-size:13px;opacity:.9}
@@ -26,391 +20,292 @@
     .btn{pointer-events:auto;display:inline-block;margin-top:14px;padding:10px 14px;border-radius:12px;border:1px solid #2b3a6a;background:#0e1733;color:var(--fg);text-decoration:none;font-weight:600}
     .btn:hover{filter:brightness(1.1)}
     .toast{position:absolute;left:50%;transform:translateX(-50%);bottom:16px;background:#0b1225cc;border:1px solid #1f2b4d;border-radius:12px;padding:8px 12px;font-size:13px}
-    .muted{opacity:.8}
+    .muted{opacity:.85}
+    .power{position:absolute;right:16px;top:66px;font-size:13px;opacity:.9}
   </style>
 </head>
 <body>
-  <canvas id="game"></canvas>
-  <div class="hud">
+  <div id="hud">
     <div class="panel" id="panel">
-      <h1>Space Runner</h1>
-      <p><strong>Goal:</strong> Dash to the end of each level while dodging asteroids.</p>
-      <p class="muted">Controls: <kbd>←</kbd>/<kbd>→</kbd> change lanes • <kbd>↑</kbd> boost • <kbd>↓</kbd> (no effect)</p>
-      <p class="muted">Tip: Boost sparingly; obstacles spawn denser at higher speeds.</p>
+      <h1>Space Runner — 3D</h1>
+      <p><strong>Goal:</strong> Reach the end of each sector by avoiding <em>holes</em> in the platforms.</p>
+      <p class="muted">Controls: <kbd>A</kbd>/<kbd>←</kbd> left • <kbd>D</kbd>/<kbd>→</kbd> right. (Forward key does nothing.)</p>
+      <p class="muted">Tip: Pick up <span style="color:var(--ok)">powerups</span> for shields and slow-mo. This version is intentionally easier to beat. 🙂</p>
     </div>
     <div class="progress" aria-label="Level progress"><span id="prog"></span></div>
     <div class="level" id="levelLabel">Level 1 / 5</div>
+    <div class="power" id="powerLabel"></div>
     <div class="center" id="overlay">
       <div>
-        <h2 style="margin:0 0 10px 0">Ready to Run?</h2>
-        <div class="muted">You are a cosmic fox sprinting across orbital platforms. Finish five sectors.</div>
+        <h2 style="margin:0 0 10px 0">Ready?</h2>
+        <div class="muted">First-person runner in space. Dodge gaps, grab powerups, finish 5 sectors.</div>
         <a class="btn" id="startBtn" href="#">Start</a>
       </div>
     </div>
     <div class="toast muted" id="toast" style="display:none"></div>
   </div>
 
+  <!-- Three.js CDN -->
+  <script src="https://unpkg.com/three@0.159.0/build/three.min.js"></script>
+
 <script>
 (() => {
-  const canvas = document.getElementById('game');
-  const ctx = canvas.getContext('2d');
-  let W = canvas.width = window.innerWidth;
-  let H = canvas.height = window.innerHeight;
+  // ----- THREE setup -----
+  let scene, camera, renderer;
+  const world = { laneX:[-4,0,4], z:0 };
+  let W = window.innerWidth, H = window.innerHeight;
+
+  scene = new THREE.Scene();
+  scene.fog = new THREE.Fog(0x050914, 10, 180);
+
+  camera = new THREE.PerspectiveCamera(70, W/H, 0.1, 500);
+  camera.position.set(0, 2.2, 6); // slightly behind the player position, looking forward
+
+  renderer = new THREE.WebGLRenderer({ antialias:true, alpha:true });
+  renderer.setSize(W,H); renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+  document.body.appendChild(renderer.domElement);
+
   window.addEventListener('resize', () => {
-    W = canvas.width = window.innerWidth;
-    H = canvas.height = window.innerHeight;
+    W = window.innerWidth; H = window.innerHeight;
+    camera.aspect = W/H; camera.updateProjectionMatrix();
+    renderer.setSize(W,H);
   });
 
-  // --- Game state ---
-  const LANES = 3;            // number of lanes (vertical)
-  const laneY = i => H * (0.35 + 0.15 * i); // y coordinate for lane index
-  const player = { x: W*0.2, lane: 1, radius: 22, vx: 0, baseSpeed: 7, boost: 0, alive: true };
-  const keys = new Set();
-  const asteroids = [];
-  const stars = [];
-  let particles = [];
+  // Lighting & background stars
+  const light = new THREE.HemisphereLight(0x88bbff, 0x101020, 0.8); scene.add(light);
+  const dir = new THREE.DirectionalLight(0xffffff, 0.6); dir.position.set(2,4,3); scene.add(dir);
 
+  const starGeo = new THREE.BufferGeometry();
+  const starCount = 800;
+  const starPos = new Float32Array(starCount*3);
+  for (let i=0;i<starCount;i++){ starPos[i*3]= (Math.random()-0.5)*80; starPos[i*3+1]= Math.random()*60; starPos[i*3+2]= -Math.random()*400; }
+  starGeo.setAttribute('position', new THREE.BufferAttribute(starPos,3));
+  const stars = new THREE.Points(starGeo, new THREE.PointsMaterial({ color:0xe6f1ff, size:0.6 }));
+  scene.add(stars);
+
+  // ----- Game state -----
+  const LANES = 3;
+  const player = { lane:1, x:0, y:1.2, z:0, alive:true, shield:false, slowMo:0 };
   const levels = [
-    { length: 900, speed: 7, spawn: 70, minGap: 1800, maxGap: 2300 },
-    { length: 1100, speed: 8, spawn: 70, minGap: 1500, maxGap: 2000 },
-    { length: 1300, speed: 9, spawn: 65, minGap: 1200, maxGap: 1800 },
-    { length: 1500, speed: 10, spawn: 60, minGap: 1000, maxGap: 1500 },
-    { length: 1700, speed: 11, spawn: 55, minGap: 850,  maxGap: 1300 }
-  ];
+    { length: 600, speed: 12, holeFreq: 0.12, holeLen:[5,9] },
+    { length: 750, speed: 13, holeFreq: 0.16, holeLen:[5,9] },
+    { length: 900, speed: 14, holeFreq: 0.18, holeLen:[5,10] },
+    { length:1050, speed: 15, holeFreq: 0.22, holeLen:[6,11] },
+    { length:1200, speed: 16, holeFreq: 0.24, holeLen:[6,12] },
+  ]; // tuned to be forgiving
   let currentLevel = 0;
-  let distance = 0;     // progress meter for current level
-  let nextSpawnAt = 0;  // distance threshold for next asteroid spawn
-  let running = false;  // is the simulation running
-  let finished = false; // game completed
-  let lastTime = 0;
+  let distance = 0;           // meters progressed this level
+  let running = false;
+  let finished = false;
+  let last = performance.now();
 
-  // Starfield layers for parallax
-  function initStars(){
-    stars.length = 0;
-    const layers = [0.2, 0.45, 0.8];
-    for (let i=0;i<layers.length;i++){
-      for (let j=0;j<120;j++){
-        stars.push({x: Math.random()*W, y: Math.random()*H, r: Math.random()*2+0.5, spd: layers[i]});
-      }
-    }
-  }
-  initStars();
-
-  // Utility
-  function randRange(a,b){ return a + Math.random()*(b-a); }
-
-  // Asteroid factory
-  function spawnAsteroid(){
-    const lane = Math.floor(Math.random()*LANES);
-    const size = randRange(16, 36);
-    const wobble = randRange(0.4, 1.1);
-    asteroids.push({ x: W + 80, y: laneY(lane), r: size, vx: 0, lane, spin: Math.random()*Math.PI, rot: randRange(-0.03,0.03), wobble });
-  }
-
-  // Particles for trail / explosions
-  function burst(x,y,color,count=18){
-    for(let i=0;i<count;i++){
-      const a = Math.random()*Math.PI*2;
-      const sp = randRange(1,5);
-      particles.push({x,y, vx: Math.cos(a)*sp, vy: Math.sin(a)*sp, life: randRange(24,42), color});
-    }
-  }
-
-  // Input
-  window.addEventListener('keydown', (e) => {
-    if (["ArrowUp","ArrowDown","ArrowLeft","ArrowRight","Space"].includes(e.key)) e.preventDefault();
-    if(!running && e.key === ' '){ startGame(); return; }
-
-    if (e.key === 'ArrowLeft'){
-      // Move left a lane
-      player.lane = Math.max(0, player.lane - 1);
-      burst(player.x, laneY(player.lane)+2, '#2ee');
-    }
-    else if (e.key === 'ArrowRight'){
-      // Move right a lane
-      player.lane = Math.min(LANES-1, player.lane + 1);
-      burst(player.x, laneY(player.lane)+2, '#a8f');
-    }
-    else if (e.key === 'ArrowUp'){
-      // forward boost while held
-      keys.add('boost');
-    }
-    else if (e.key === 'ArrowDown'){
-      // Back key intentionally does nothing
-      showToast('Back key disabled — forward only!');
-    }
-  });
-  window.addEventListener('keyup', (e) => {
-    if (e.key === 'ArrowUp') keys.delete('boost');
-  });
-
-  // UI helpers
+  // HUD
   const overlay = document.getElementById('overlay');
-  const startBtn = document.getElementById('startBtn');
   const progBar = document.getElementById('prog');
   const levelLabel = document.getElementById('levelLabel');
+  const powerLabel = document.getElementById('powerLabel');
   const toast = document.getElementById('toast');
-  let toastTimer = null;
+  document.getElementById('startBtn').addEventListener('click', e=>{ e.preventDefault(); startGame(); });
 
-  startBtn.addEventListener('click', (e)=>{ e.preventDefault(); startGame(); });
+  function setLevelLabel(){ levelLabel.textContent = `Level ${currentLevel+1} / ${levels.length}`; }
 
   function showToast(msg){
-    toast.textContent = msg;
-    toast.style.display = 'block';
-    clearTimeout(toastTimer);
-    toastTimer = setTimeout(()=> toast.style.display = 'none', 1200);
+    toast.textContent = msg; toast.style.display='block';
+    clearTimeout(showToast._t); showToast._t = setTimeout(()=> toast.style.display='none', 1100);
   }
 
-  function startGame(){
-    resetLevel(0);
-    running = true;
-    finished = false;
-    overlay.style.display = 'none';
-    lastTime = performance.now();
+  // ----- Track generation -----
+  const SEG = 4;                  // segment length (meters)
+  const LOOKAHEAD = 220;          // how far to build track
+  const laneGroups = [new THREE.Group(), new THREE.Group(), new THREE.Group()];
+  laneGroups.forEach((g,i)=>{ g.position.x = world.laneX[i]; scene.add(g); });
+
+  const platMat = new THREE.MeshStandardMaterial({ color:0x20305a, metalness:0.2, roughness:0.7 });
+  const holeMat = new THREE.MeshStandardMaterial({ color:0x0a0f24, metalness:0.1, roughness:1.0 });
+  const geom = new THREE.BoxGeometry(2.2, 0.2, SEG);
+
+  const powerups = []; // {mesh,type,z,lane}
+  const powGeom = new THREE.IcosahedronGeometry(0.35, 0);
+  const powMats = {
+    shield: new THREE.MeshStandardMaterial({ color:0x6fffb7, emissive:0x113322, emissiveIntensity:0.6 }),
+    slow:   new THREE.MeshStandardMaterial({ color:0xffd166, emissive:0x332211, emissiveIntensity:0.6 })
+  };
+
+  // track data per lane: array of segments {z, hasPlatform, hasPower: 'shield'|'slow'|null}
+  const lanes = [[],[],[]];
+
+  function resetLevel(idx){
+    currentLevel = idx; distance = 0; player.alive = true; player.shield=false; player.slowMo=0; running=true; finished=false;
+    setLevelLabel(); powerLabel.textContent='';
+    // clear scene children from lanes & powerups
+    laneGroups.forEach(g=>{ while(g.children.length) g.remove(g.children[0]); });
+    powerups.splice(0,powerups.length);
+    lanes.forEach(arr=>arr.splice(0,arr.length));
+    // prebuild some safe track at start
+    for (let z=0; z<60; z+=SEG){
+      for (let L=0;L<LANES;L++) addSegment(L, z, true);
+    }
+  }
+
+  function randInt(a,b){ return Math.floor(a + Math.random()*(b-a+1)); }
+
+  function addSegment(lane, z, forceSolid=false){
+    const cfg = levels[currentLevel];
+    let solid = forceSolid || Math.random() > cfg.holeFreq;
+    // ensure holes are not too long or immediately at start
+    if (z < 40) solid = true;
+
+    // build mesh
+    const g = solid ? geom : geom; // always place something; if hole, we place a dark "gap" slab slightly lower for visual depth
+    const m = new THREE.Mesh(g, solid?platMat:holeMat);
+    m.position.set(0, solid?0: -0.02, -z);
+    laneGroups[lane].add(m);
+
+    // occasional powerups on solid tiles
+    let pow = null;
+    if (solid && Math.random() < 0.06){
+      const type = Math.random()<0.5 ? 'shield' : 'slow';
+      const pm = new THREE.Mesh(powGeom, powMats[type]);
+      pm.position.set(world.laneX[lane], 0.9, -(z + SEG*0.5));
+      pm.rotation.set(Math.random(), Math.random(), Math.random());
+      scene.add(pm);
+      pow = {mesh:pm, type, z: z+SEG*0.5, lane};
+      powerups.push(pow);
+    }
+
+    lanes[lane].push({ z, solid, pow });
+  }
+
+  function ensureLookahead(){
+    const buildUpto = distance + LOOKAHEAD;
+    const lastZ = lanes[0].length ? lanes[0][lanes[0].length-1].z : 0;
+    for (let z = lastZ + SEG; z < buildUpto; z += SEG){
+      for (let L=0; L<LANES; L++) addSegment(L, z);
+    }
+  }
+
+  // ----- Player & input -----
+  const keys = new Set();
+  window.addEventListener('keydown', (e)=>{
+    if (["ArrowLeft","ArrowRight","a","A","d","D","ArrowUp","ArrowDown"].includes(e.key)) e.preventDefault();
+    if (!running && e.key===' ') { startGame(); return; }
+
+    if (e.key==='ArrowLeft' || e.key==='a' || e.key==='A') moveLane(-1);
+    if (e.key==='ArrowRight'|| e.key==='d' || e.key==='D') moveLane(1);
+    if (e.key==='ArrowUp' || e.key==='ArrowDown') { /* do nothing on purpose */ }
+  });
+
+  function moveLane(dir){
+    player.lane = Math.max(0, Math.min(LANES-1, player.lane + dir));
+    player.x = world.laneX[player.lane];
+    showToast(dir<0? 'Left' : 'Right');
+  }
+
+  // visual player marker (nose of the craft/animal; camera is FP but this helps alignment)
+  const noseGeo = new THREE.ConeGeometry(0.2, 0.6, 16);
+  const noseMat = new THREE.MeshStandardMaterial({ color:0x66e6ff, emissive:0x112244, emissiveIntensity:0.5 });
+  const nose = new THREE.Mesh(noseGeo, noseMat); scene.add(nose); nose.rotation.x = Math.PI/2; nose.position.set(0,1.0, 0.2);
+
+  // ----- Game flow -----
+  function startGame(){ resetLevel(0); overlay.style.display='none'; last=performance.now(); requestAnimationFrame(loop); }
+
+  function completeGame(){ running=false; finished=true; overlay.style.display='grid';
+    overlay.querySelector('div').innerHTML = `
+      <h2 style="margin:0 0 10px 0">Mission Complete!</h2>
+      <div class="muted">You cleared all sectors. GG.</div>
+      <a class="btn" id="againBtn" href="#">Play Again</a>`;
+    overlay.querySelector('#againBtn').addEventListener('click', e=>{ e.preventDefault(); startGame(); });
+  }
+
+  function crash(){ if(!player.alive) return; player.alive=false; running=false; overlay.style.display='grid';
+    overlay.querySelector('div').innerHTML = `
+      <h2 style="margin:0 0 10px 0">You Fell!</h2>
+      <div class="muted">Mind the gaps. Try again—this version is easier.</div>
+      <a class="btn" id="retryBtn" href="#">Retry Level</a>`;
+    overlay.querySelector('#retryBtn').addEventListener('click', e=>{ e.preventDefault(); overlay.style.display='none'; player.alive=true; running=true; last=performance.now(); requestAnimationFrame(loop); });
+  }
+
+  // ----- Loop -----
+  function loop(ts){
+    if (!running) return;
+    const dt = Math.min(40, ts-last); last = ts;
+    const cfg = levels[currentLevel];
+
+    // speed & slow-mo
+    if (player.slowMo>0) player.slowMo = Math.max(0, player.slowMo - dt/1000);
+    const speed = (player.slowMo>0 ? cfg.speed*0.55 : cfg.speed);
+
+    distance += (speed * dt/1000) * 4;  // meters per second scaled
+    ensureLookahead();
+
+    // move camera forward
+    camera.position.z -= (speed * dt/1000) * 4;
+    world.z = -camera.position.z; // positive forward distance
+
+    // update player marker alignment
+    nose.position.set(world.laneX[player.lane], 1.0, camera.position.z - 1.4);
+
+    // remove passed segments + check floor under player
+    for (let L=0; L<LANES; L++){
+      const arr = lanes[L];
+      while (arr.length && (arr[0].z + SEG) < world.z - 6){ // far behind camera
+        const seg = arr.shift();
+        const grp = laneGroups[L];
+        if (grp.children.length) grp.remove(grp.children[0]);
+      }
+    }
+
+    // collision with gap (no floor)
+    const laneArr = lanes[player.lane];
+    const zAhead = world.z + 1.4; // a little ahead of camera
+    let onFloor = true;
+    for (let i=0;i<laneArr.length;i++){
+      const seg = laneArr[i];
+      if (zAhead >= seg.z && zAhead < seg.z + SEG){ onFloor = seg.solid; break; }
+    }
+
+    // powerups
+    for (let i=powerups.length-1;i>=0;i--){
+      const p = powerups[i];
+      if (Math.abs(p.z - zAhead) < 1.0 && p.lane === player.lane){
+        if (p.type==='shield'){ player.shield=true; powerLabel.textContent='Shield active (one save)'; }
+        if (p.type==='slow'){ player.slowMo = 3.2; powerLabel.textContent='Slow-mo 3s'; }
+        scene.remove(p.mesh); powerups.splice(i,1);
+      } else if (p.z < world.z - 6){ scene.remove(p.mesh); powerups.splice(i,1); }
+      else { p.mesh.rotation.x += 0.01; p.mesh.rotation.y += 0.02; }
+    }
+
+    if (!onFloor){
+      if (player.shield){ player.shield=false; powerLabel.textContent=''; // forgive once and fill gap visually for feedback
+        // create a temporary bridge tile to save the player
+        const bridge = new THREE.Mesh(geom, new THREE.MeshStandardMaterial({ color:0x2a6d6d }));
+        bridge.position.set(world.laneX[player.lane], 0, -(Math.floor(zAhead/SEG)*SEG));
+        scene.add(bridge); setTimeout(()=> scene.remove(bridge), 800);
+      } else {
+        return crash();
+      }
+    }
+
+    // level complete
+    if (distance >= levels[currentLevel].length){
+      if (currentLevel < levels.length-1){ currentLevel++; setLevelLabel(); resetLevel(currentLevel); showToast(`Level ${currentLevel} start`); }
+      else { return completeGame(); }
+    }
+
+    // HUD progress
+    const pct = Math.min(1, distance / levels[currentLevel].length);
+    progBar.style.width = (pct*100).toFixed(2) + '%';
+
+    // tiny star drift
+    stars.position.z += 0.1;
+
+    renderer.render(scene, camera);
     requestAnimationFrame(loop);
   }
 
-  function resetLevel(idx){
-    currentLevel = idx;
-    distance = 0;
-    nextSpawnAt = 0;
-    asteroids.length = 0;
-    particles.length = 0;
-    player.alive = true;
-    player.lane = 1;
-    player.boost = 0;
-    levelLabel.textContent = `Level ${currentLevel+1} / ${levels.length}`;
-  }
-
-  function completeGame(){
-    running = false; finished = true;
-    overlay.style.display = 'grid';
-    overlay.querySelector('div').innerHTML = `
-      <h2 style="margin:0 0 10px 0">Mission Complete!</h2>
-      <div class="muted">You conquered all space sectors. Stellar work.</div>
-      <a class="btn" id="againBtn" href="#">Play Again</a>
-    `;
-    overlay.querySelector('#againBtn').addEventListener('click',(e)=>{e.preventDefault(); startGame();});
-  }
-
-  function crash(){
-    if (!player.alive) return;
-    player.alive = false;
-    burst(player.x+6, laneY(player.lane), '#f77', 32);
-    showToast('You crashed! Press Space to retry.');
-    running = false;
-    overlay.style.display = 'grid';
-    overlay.querySelector('div').innerHTML = `
-      <h2 style="margin:0 0 10px 0">Crashed!</h2>
-      <div class="muted">Asteroid impact. Try the level again.</div>
-      <a class="btn" id="retryBtn" href="#">Retry Level</a>
-    `;
-    overlay.querySelector('#retryBtn').addEventListener('click',(e)=>{e.preventDefault();
-      overlay.style.display='none'; player.alive=true; running=true; lastTime=performance.now(); requestAnimationFrame(loop);
-    });
-  }
-
-  // Core loop
-  function loop(ts){
-    if (!running) return; // stop when not running
-    const dt = Math.min(40, ts - lastTime); // clamp dt
-    lastTime = ts;
-
-    const L = levels[currentLevel];
-    const speed = L.speed + (keys.has('boost') ? 4 : 0);
-    player.boost += (keys.has('boost') ? 0.12 : -0.12);
-    player.boost = Math.max(0, Math.min(1, player.boost));
-
-    distance += (speed) * (dt/16);
-
-    // Spawn asteroids by distance, tighter gaps at higher boost
-    while (distance >= nextSpawnAt){
-      spawnAsteroid();
-      const gap = randRange(L.minGap, L.maxGap) * (1 - 0.35*player.boost);
-      nextSpawnAt = distance + gap/100; // normalize gap scale
-    }
-
-    // Update asteroids
-    for (let i=asteroids.length-1;i>=0;i--){
-      const a = asteroids[i];
-      a.x -= speed * (dt/16) * 10; // world scroll speed
-      a.spin += a.rot;
-      a.y += Math.sin(a.spin)*a.wobble*0.2;
-      if (a.x < -60) asteroids.splice(i,1);
-    }
-
-    // Update particles
-    for (let i=particles.length-1;i>=0;i--){
-      const p = particles[i];
-      p.x += p.vx; p.y += p.vy; p.life -= 1;
-      if (p.life <= 0) particles.splice(i,1);
-    }
-
-    // Collisions (circle vs circle approximation)
-    for (const a of asteroids){
-      if (a.lane !== player.lane) continue; // only collide in same lane
-      const dx = (player.x+6) - a.x;
-      const dy = laneY(player.lane) - a.y;
-      const r = player.radius + a.r*0.8;
-      if (dx*dx + dy*dy < r*r){ crash(); }
-    }
-
-    // Level complete?
-    if (distance >= L.length){
-      if (currentLevel < levels.length - 1){
-        // Advance to next level with brief banner
-        currentLevel++;
-        showToast(`Level ${currentLevel} complete!`);
-        resetLevel(currentLevel);
-        // quick celebratory burst
-        burst(player.x+20, laneY(player.lane), '#7fffd4', 24);
-      } else {
-        completeGame();
-      }
-    }
-
-    // Render
-    drawBackground(speed);
-    drawPlatforms();
-    drawAsteroids();
-    drawPlayer();
-    drawParticles();
-
-    // HUD progress
-    const pct = Math.min(1, distance / L.length);
-    progBar.style.width = (pct*100).toFixed(2) + '%';
-
-    if (running) requestAnimationFrame(loop);
-  }
-
-  // --- Rendering helpers ---
-  function drawBackground(speed){
-    ctx.clearRect(0,0,W,H);
-
-    // deep gradient bleed
-    const g = ctx.createRadialGradient(W*0.7, H*-0.2, 200, W*0.5, H*0.4, Math.max(W,H));
-    g.addColorStop(0,'#0b1230');
-    g.addColorStop(1,'#03060f');
-    ctx.fillStyle = g; ctx.fillRect(0,0,W,H);
-
-    // stars parallax
-    for (const s of stars){
-      s.x -= (speed*0.2)*s.spd; if (s.x < 0) s.x += W;
-      ctx.globalAlpha = 0.7*s.spd; ctx.beginPath(); ctx.arc(s.x, s.y, s.r, 0, Math.PI*2); ctx.fillStyle = '#eef2ff'; ctx.fill();
-    }
-    ctx.globalAlpha = 1;
-  }
-
-  function drawPlatforms(){
-    // Orbital lanes (visual only)
-    for (let i=0;i<LANES;i++){
-      const y = laneY(i);
-      ctx.strokeStyle = 'rgba(140,170,255,0.18)';
-      ctx.lineWidth = 4;
-      ctx.beginPath();
-      ctx.moveTo(0, y);
-      ctx.lineTo(W, y);
-      ctx.stroke();
-      // luminous dots
-      for (let x=0;x<W;x+=140){
-        ctx.fillStyle = 'rgba(140,170,255,0.25)';
-        ctx.beginPath(); ctx.arc((x + (performance.now()/30) % 140), y, 3, 0, Math.PI*2); ctx.fill();
-      }
-    }
-  }
-
-  function drawAsteroids(){
-    for (const a of asteroids){
-      ctx.save();
-      ctx.translate(a.x, a.y);
-      ctx.rotate(a.spin);
-      const grd = ctx.createRadialGradient(0,0,2, 0,0,a.r);
-      grd.addColorStop(0,'#e6edf9');
-      grd.addColorStop(1,'#6c7bb4');
-      ctx.fillStyle = grd;
-      polygon(7, a.r);
-      ctx.fill();
-      ctx.restore();
-
-      // soft glow
-      ctx.beginPath(); ctx.arc(a.x, a.y, a.r*1.25, 0, Math.PI*2);
-      ctx.strokeStyle = 'rgba(150,180,255,0.15)'; ctx.lineWidth = 2; ctx.stroke();
-    }
-  }
-
-  function drawPlayer(){
-    const y = laneY(player.lane);
-    const t = performance.now()/1000;
-    const bob = Math.sin(t*10 + player.lane) * 2;
-    const trail = 8 + player.boost*18;
-
-    // rocket trail
-    for (let i=0;i<trail;i++){
-      const alpha = (1 - i/trail) * (0.35 + 0.65*player.boost);
-      ctx.globalAlpha = alpha;
-      ctx.fillStyle = `hsl(${220 + i*6}, 90%, ${50 - i*2}%)`;
-      ctx.beginPath(); ctx.ellipse(player.x - 10 - i*6, y + bob, 6 - i*0.5, 3 - i*0.25, 0, 0, Math.PI*2); ctx.fill();
-    }
-    ctx.globalAlpha = 1;
-
-    // player body (a stylized cosmic fox)
-    ctx.save();
-    ctx.translate(player.x, y + bob);
-
-    // body
-    ctx.fillStyle = '#ffd9a6';
-    roundedRect(-18, -12, 36, 24, 10); ctx.fill();
-
-    // head
-    ctx.beginPath(); ctx.ellipse(10, -10, 12, 10, 0, 0, Math.PI*2); ctx.fillStyle = '#ffe6bf'; ctx.fill();
-    // ears
-    ctx.fillStyle = '#ffc08a'; triangle(18,-18, 8,-12, 18,-8); triangle(2,-18, 8,-12, 2,-8);
-    // eye visor
-    ctx.fillStyle = '#6ad8ff'; roundedRect(6,-12, 12,8, 4); ctx.fill();
-
-    // tail (sway)
-    ctx.save(); ctx.translate(-20,0); ctx.rotate(Math.sin(t*6)*0.25);
-    ctx.fillStyle = '#ffd9a6'; roundedRect(-14,-6, 18,12, 6); ctx.fill();
-    ctx.restore();
-
-    ctx.restore();
-  }
-
-  function drawParticles(){
-    for (const p of particles){
-      ctx.globalAlpha = Math.max(0, p.life/42);
-      ctx.fillStyle = p.color || '#fff';
-      ctx.fillRect(p.x, p.y, 2, 2);
-    }
-    ctx.globalAlpha = 1;
-  }
-
-  // small drawing helpers
-  function polygon(sides, r){
-    ctx.beginPath();
-    for(let i=0;i<sides;i++){
-      const a = (i/sides)*Math.PI*2;
-      const x = Math.cos(a)*r;
-      const y = Math.sin(a)*r;
-      if (i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
-    }
-    ctx.closePath();
-  }
-  function roundedRect(x,y,w,h,r){
-    ctx.beginPath();
-    ctx.moveTo(x+r,y);
-    ctx.lineTo(x+w-r,y);
-    ctx.quadraticCurveTo(x+w,y, x+w,y+r);
-    ctx.lineTo(x+w,y+h-r);
-    ctx.quadraticCurveTo(x+w,y+h, x+w-r,y+h);
-    ctx.lineTo(x+r,y+h);
-    ctx.quadraticCurveTo(x,y+h, x,y+h-r);
-    ctx.lineTo(x,y+r);
-    ctx.quadraticCurveTo(x,y, x+r,y);
-  }
-  function triangle(x1,y1,x2,y2,x3,y3){
-    ctx.beginPath(); ctx.moveTo(x1,y1); ctx.lineTo(x2,y2); ctx.lineTo(x3,y3); ctx.closePath(); ctx.fill();
-  }
+  // ----- Kickoff instructions -----
+  function showStart(){ overlay.style.display='grid'; }
+  showStart();
 
 })();
 </script>

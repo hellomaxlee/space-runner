@@ -1,0 +1,418 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Space Runner</title>
+  <style>
+    :root{
+      --bg:#050914;
+      --fg:#e6f1ff;
+      --accent:#66e6ff;
+      --accent2:#9b66ff;
+      --danger:#ff5d7a;
+      --success:#6fffb7;
+    }
+    html,body{height:100%;margin:0;background:radial-gradient(1200px 600px at 70% -10%,#0f1630 0%,#070b18 40%,#05080f 70%, #03050b 100%);color:var(--fg);font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;}
+    canvas{display:block;width:100vw;height:100vh;}
+    .hud{position:fixed;inset:0;pointer-events:none}
+    .panel{position:absolute;left:16px;top:16px;background:#0b1225cc;border:1px solid #1f2b4d;border-radius:12px;padding:10px 12px;backdrop-filter: blur(4px);}
+    .panel h1{font-size:16px;margin:0 0 4px 0;letter-spacing:.05em;color:var(--accent)}
+    .panel p{margin:2px 0;font-size:13px;opacity:.9}
+    .progress{position:absolute;right:16px;top:16px;width:min(38vw,420px);height:14px;background:#101835;border-radius:999px;border:1px solid #1f2b4d;overflow:hidden}
+    .progress > span{display:block;height:100%;width:0;background:linear-gradient(90deg,var(--accent),var(--accent2));}
+    .level{position:absolute;right:16px;top:40px;font-size:13px;opacity:.9}
+    .center{position:absolute;inset:0;display:grid;place-items:center;text-align:center;padding:20px}
+    .btn{pointer-events:auto;display:inline-block;margin-top:14px;padding:10px 14px;border-radius:12px;border:1px solid #2b3a6a;background:#0e1733;color:var(--fg);text-decoration:none;font-weight:600}
+    .btn:hover{filter:brightness(1.1)}
+    .toast{position:absolute;left:50%;transform:translateX(-50%);bottom:16px;background:#0b1225cc;border:1px solid #1f2b4d;border-radius:12px;padding:8px 12px;font-size:13px}
+    .muted{opacity:.8}
+  </style>
+</head>
+<body>
+  <canvas id="game"></canvas>
+  <div class="hud">
+    <div class="panel" id="panel">
+      <h1>Space Runner</h1>
+      <p><strong>Goal:</strong> Dash to the end of each level while dodging asteroids.</p>
+      <p class="muted">Controls: <kbd>←</kbd>/<kbd>→</kbd> change lanes • <kbd>↑</kbd> boost • <kbd>↓</kbd> (no effect)</p>
+      <p class="muted">Tip: Boost sparingly; obstacles spawn denser at higher speeds.</p>
+    </div>
+    <div class="progress" aria-label="Level progress"><span id="prog"></span></div>
+    <div class="level" id="levelLabel">Level 1 / 5</div>
+    <div class="center" id="overlay">
+      <div>
+        <h2 style="margin:0 0 10px 0">Ready to Run?</h2>
+        <div class="muted">You are a cosmic fox sprinting across orbital platforms. Finish five sectors.</div>
+        <a class="btn" id="startBtn" href="#">Start</a>
+      </div>
+    </div>
+    <div class="toast muted" id="toast" style="display:none"></div>
+  </div>
+
+<script>
+(() => {
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  let W = canvas.width = window.innerWidth;
+  let H = canvas.height = window.innerHeight;
+  window.addEventListener('resize', () => {
+    W = canvas.width = window.innerWidth;
+    H = canvas.height = window.innerHeight;
+  });
+
+  // --- Game state ---
+  const LANES = 3;            // number of lanes (vertical)
+  const laneY = i => H * (0.35 + 0.15 * i); // y coordinate for lane index
+  const player = { x: W*0.2, lane: 1, radius: 22, vx: 0, baseSpeed: 7, boost: 0, alive: true };
+  const keys = new Set();
+  const asteroids = [];
+  const stars = [];
+  let particles = [];
+
+  const levels = [
+    { length: 900, speed: 7, spawn: 70, minGap: 1800, maxGap: 2300 },
+    { length: 1100, speed: 8, spawn: 70, minGap: 1500, maxGap: 2000 },
+    { length: 1300, speed: 9, spawn: 65, minGap: 1200, maxGap: 1800 },
+    { length: 1500, speed: 10, spawn: 60, minGap: 1000, maxGap: 1500 },
+    { length: 1700, speed: 11, spawn: 55, minGap: 850,  maxGap: 1300 }
+  ];
+  let currentLevel = 0;
+  let distance = 0;     // progress meter for current level
+  let nextSpawnAt = 0;  // distance threshold for next asteroid spawn
+  let running = false;  // is the simulation running
+  let finished = false; // game completed
+  let lastTime = 0;
+
+  // Starfield layers for parallax
+  function initStars(){
+    stars.length = 0;
+    const layers = [0.2, 0.45, 0.8];
+    for (let i=0;i<layers.length;i++){
+      for (let j=0;j<120;j++){
+        stars.push({x: Math.random()*W, y: Math.random()*H, r: Math.random()*2+0.5, spd: layers[i]});
+      }
+    }
+  }
+  initStars();
+
+  // Utility
+  function randRange(a,b){ return a + Math.random()*(b-a); }
+
+  // Asteroid factory
+  function spawnAsteroid(){
+    const lane = Math.floor(Math.random()*LANES);
+    const size = randRange(16, 36);
+    const wobble = randRange(0.4, 1.1);
+    asteroids.push({ x: W + 80, y: laneY(lane), r: size, vx: 0, lane, spin: Math.random()*Math.PI, rot: randRange(-0.03,0.03), wobble });
+  }
+
+  // Particles for trail / explosions
+  function burst(x,y,color,count=18){
+    for(let i=0;i<count;i++){
+      const a = Math.random()*Math.PI*2;
+      const sp = randRange(1,5);
+      particles.push({x,y, vx: Math.cos(a)*sp, vy: Math.sin(a)*sp, life: randRange(24,42), color});
+    }
+  }
+
+  // Input
+  window.addEventListener('keydown', (e) => {
+    if (["ArrowUp","ArrowDown","ArrowLeft","ArrowRight","Space"].includes(e.key)) e.preventDefault();
+    if(!running && e.key === ' '){ startGame(); return; }
+
+    if (e.key === 'ArrowLeft'){
+      // Move left a lane
+      player.lane = Math.max(0, player.lane - 1);
+      burst(player.x, laneY(player.lane)+2, '#2ee');
+    }
+    else if (e.key === 'ArrowRight'){
+      // Move right a lane
+      player.lane = Math.min(LANES-1, player.lane + 1);
+      burst(player.x, laneY(player.lane)+2, '#a8f');
+    }
+    else if (e.key === 'ArrowUp'){
+      // forward boost while held
+      keys.add('boost');
+    }
+    else if (e.key === 'ArrowDown'){
+      // Back key intentionally does nothing
+      showToast('Back key disabled — forward only!');
+    }
+  });
+  window.addEventListener('keyup', (e) => {
+    if (e.key === 'ArrowUp') keys.delete('boost');
+  });
+
+  // UI helpers
+  const overlay = document.getElementById('overlay');
+  const startBtn = document.getElementById('startBtn');
+  const progBar = document.getElementById('prog');
+  const levelLabel = document.getElementById('levelLabel');
+  const toast = document.getElementById('toast');
+  let toastTimer = null;
+
+  startBtn.addEventListener('click', (e)=>{ e.preventDefault(); startGame(); });
+
+  function showToast(msg){
+    toast.textContent = msg;
+    toast.style.display = 'block';
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(()=> toast.style.display = 'none', 1200);
+  }
+
+  function startGame(){
+    resetLevel(0);
+    running = true;
+    finished = false;
+    overlay.style.display = 'none';
+    lastTime = performance.now();
+    requestAnimationFrame(loop);
+  }
+
+  function resetLevel(idx){
+    currentLevel = idx;
+    distance = 0;
+    nextSpawnAt = 0;
+    asteroids.length = 0;
+    particles.length = 0;
+    player.alive = true;
+    player.lane = 1;
+    player.boost = 0;
+    levelLabel.textContent = `Level ${currentLevel+1} / ${levels.length}`;
+  }
+
+  function completeGame(){
+    running = false; finished = true;
+    overlay.style.display = 'grid';
+    overlay.querySelector('div').innerHTML = `
+      <h2 style="margin:0 0 10px 0">Mission Complete!</h2>
+      <div class="muted">You conquered all space sectors. Stellar work.</div>
+      <a class="btn" id="againBtn" href="#">Play Again</a>
+    `;
+    overlay.querySelector('#againBtn').addEventListener('click',(e)=>{e.preventDefault(); startGame();});
+  }
+
+  function crash(){
+    if (!player.alive) return;
+    player.alive = false;
+    burst(player.x+6, laneY(player.lane), '#f77', 32);
+    showToast('You crashed! Press Space to retry.');
+    running = false;
+    overlay.style.display = 'grid';
+    overlay.querySelector('div').innerHTML = `
+      <h2 style="margin:0 0 10px 0">Crashed!</h2>
+      <div class="muted">Asteroid impact. Try the level again.</div>
+      <a class="btn" id="retryBtn" href="#">Retry Level</a>
+    `;
+    overlay.querySelector('#retryBtn').addEventListener('click',(e)=>{e.preventDefault();
+      overlay.style.display='none'; player.alive=true; running=true; lastTime=performance.now(); requestAnimationFrame(loop);
+    });
+  }
+
+  // Core loop
+  function loop(ts){
+    if (!running) return; // stop when not running
+    const dt = Math.min(40, ts - lastTime); // clamp dt
+    lastTime = ts;
+
+    const L = levels[currentLevel];
+    const speed = L.speed + (keys.has('boost') ? 4 : 0);
+    player.boost += (keys.has('boost') ? 0.12 : -0.12);
+    player.boost = Math.max(0, Math.min(1, player.boost));
+
+    distance += (speed) * (dt/16);
+
+    // Spawn asteroids by distance, tighter gaps at higher boost
+    while (distance >= nextSpawnAt){
+      spawnAsteroid();
+      const gap = randRange(L.minGap, L.maxGap) * (1 - 0.35*player.boost);
+      nextSpawnAt = distance + gap/100; // normalize gap scale
+    }
+
+    // Update asteroids
+    for (let i=asteroids.length-1;i>=0;i--){
+      const a = asteroids[i];
+      a.x -= speed * (dt/16) * 10; // world scroll speed
+      a.spin += a.rot;
+      a.y += Math.sin(a.spin)*a.wobble*0.2;
+      if (a.x < -60) asteroids.splice(i,1);
+    }
+
+    // Update particles
+    for (let i=particles.length-1;i>=0;i--){
+      const p = particles[i];
+      p.x += p.vx; p.y += p.vy; p.life -= 1;
+      if (p.life <= 0) particles.splice(i,1);
+    }
+
+    // Collisions (circle vs circle approximation)
+    for (const a of asteroids){
+      if (a.lane !== player.lane) continue; // only collide in same lane
+      const dx = (player.x+6) - a.x;
+      const dy = laneY(player.lane) - a.y;
+      const r = player.radius + a.r*0.8;
+      if (dx*dx + dy*dy < r*r){ crash(); }
+    }
+
+    // Level complete?
+    if (distance >= L.length){
+      if (currentLevel < levels.length - 1){
+        // Advance to next level with brief banner
+        currentLevel++;
+        showToast(`Level ${currentLevel} complete!`);
+        resetLevel(currentLevel);
+        // quick celebratory burst
+        burst(player.x+20, laneY(player.lane), '#7fffd4', 24);
+      } else {
+        completeGame();
+      }
+    }
+
+    // Render
+    drawBackground(speed);
+    drawPlatforms();
+    drawAsteroids();
+    drawPlayer();
+    drawParticles();
+
+    // HUD progress
+    const pct = Math.min(1, distance / L.length);
+    progBar.style.width = (pct*100).toFixed(2) + '%';
+
+    if (running) requestAnimationFrame(loop);
+  }
+
+  // --- Rendering helpers ---
+  function drawBackground(speed){
+    ctx.clearRect(0,0,W,H);
+
+    // deep gradient bleed
+    const g = ctx.createRadialGradient(W*0.7, H*-0.2, 200, W*0.5, H*0.4, Math.max(W,H));
+    g.addColorStop(0,'#0b1230');
+    g.addColorStop(1,'#03060f');
+    ctx.fillStyle = g; ctx.fillRect(0,0,W,H);
+
+    // stars parallax
+    for (const s of stars){
+      s.x -= (speed*0.2)*s.spd; if (s.x < 0) s.x += W;
+      ctx.globalAlpha = 0.7*s.spd; ctx.beginPath(); ctx.arc(s.x, s.y, s.r, 0, Math.PI*2); ctx.fillStyle = '#eef2ff'; ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  function drawPlatforms(){
+    // Orbital lanes (visual only)
+    for (let i=0;i<LANES;i++){
+      const y = laneY(i);
+      ctx.strokeStyle = 'rgba(140,170,255,0.18)';
+      ctx.lineWidth = 4;
+      ctx.beginPath();
+      ctx.moveTo(0, y);
+      ctx.lineTo(W, y);
+      ctx.stroke();
+      // luminous dots
+      for (let x=0;x<W;x+=140){
+        ctx.fillStyle = 'rgba(140,170,255,0.25)';
+        ctx.beginPath(); ctx.arc((x + (performance.now()/30) % 140), y, 3, 0, Math.PI*2); ctx.fill();
+      }
+    }
+  }
+
+  function drawAsteroids(){
+    for (const a of asteroids){
+      ctx.save();
+      ctx.translate(a.x, a.y);
+      ctx.rotate(a.spin);
+      const grd = ctx.createRadialGradient(0,0,2, 0,0,a.r);
+      grd.addColorStop(0,'#e6edf9');
+      grd.addColorStop(1,'#6c7bb4');
+      ctx.fillStyle = grd;
+      polygon(7, a.r);
+      ctx.fill();
+      ctx.restore();
+
+      // soft glow
+      ctx.beginPath(); ctx.arc(a.x, a.y, a.r*1.25, 0, Math.PI*2);
+      ctx.strokeStyle = 'rgba(150,180,255,0.15)'; ctx.lineWidth = 2; ctx.stroke();
+    }
+  }
+
+  function drawPlayer(){
+    const y = laneY(player.lane);
+    const t = performance.now()/1000;
+    const bob = Math.sin(t*10 + player.lane) * 2;
+    const trail = 8 + player.boost*18;
+
+    // rocket trail
+    for (let i=0;i<trail;i++){
+      const alpha = (1 - i/trail) * (0.35 + 0.65*player.boost);
+      ctx.globalAlpha = alpha;
+      ctx.fillStyle = `hsl(${220 + i*6}, 90%, ${50 - i*2}%)`;
+      ctx.beginPath(); ctx.ellipse(player.x - 10 - i*6, y + bob, 6 - i*0.5, 3 - i*0.25, 0, 0, Math.PI*2); ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+
+    // player body (a stylized cosmic fox)
+    ctx.save();
+    ctx.translate(player.x, y + bob);
+
+    // body
+    ctx.fillStyle = '#ffd9a6';
+    roundedRect(-18, -12, 36, 24, 10); ctx.fill();
+
+    // head
+    ctx.beginPath(); ctx.ellipse(10, -10, 12, 10, 0, 0, Math.PI*2); ctx.fillStyle = '#ffe6bf'; ctx.fill();
+    // ears
+    ctx.fillStyle = '#ffc08a'; triangle(18,-18, 8,-12, 18,-8); triangle(2,-18, 8,-12, 2,-8);
+    // eye visor
+    ctx.fillStyle = '#6ad8ff'; roundedRect(6,-12, 12,8, 4); ctx.fill();
+
+    // tail (sway)
+    ctx.save(); ctx.translate(-20,0); ctx.rotate(Math.sin(t*6)*0.25);
+    ctx.fillStyle = '#ffd9a6'; roundedRect(-14,-6, 18,12, 6); ctx.fill();
+    ctx.restore();
+
+    ctx.restore();
+  }
+
+  function drawParticles(){
+    for (const p of particles){
+      ctx.globalAlpha = Math.max(0, p.life/42);
+      ctx.fillStyle = p.color || '#fff';
+      ctx.fillRect(p.x, p.y, 2, 2);
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  // small drawing helpers
+  function polygon(sides, r){
+    ctx.beginPath();
+    for(let i=0;i<sides;i++){
+      const a = (i/sides)*Math.PI*2;
+      const x = Math.cos(a)*r;
+      const y = Math.sin(a)*r;
+      if (i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
+    }
+    ctx.closePath();
+  }
+  function roundedRect(x,y,w,h,r){
+    ctx.beginPath();
+    ctx.moveTo(x+r,y);
+    ctx.lineTo(x+w-r,y);
+    ctx.quadraticCurveTo(x+w,y, x+w,y+r);
+    ctx.lineTo(x+w,y+h-r);
+    ctx.quadraticCurveTo(x+w,y+h, x+w-r,y+h);
+    ctx.lineTo(x+r,y+h);
+    ctx.quadraticCurveTo(x,y+h, x,y+h-r);
+    ctx.lineTo(x,y+r);
+    ctx.quadraticCurveTo(x,y, x+r,y);
+  }
+  function triangle(x1,y1,x2,y2,x3,y3){
+    ctx.beginPath(); ctx.moveTo(x1,y1); ctx.lineTo(x2,y2); ctx.lineTo(x3,y3); ctx.closePath(); ctx.fill();
+  }
+
+})();
+</script>
+</body>
+</html>
